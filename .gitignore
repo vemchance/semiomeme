@@ -1,0 +1,39 @@
+# Data files
+*.npy
+*.faiss
+*.pkl
+*.ttl
+*.csv
+*.json
+*.jpg
+*.png
+*.gif
+*.pt
+*.pth
+*.xlsx
+*.graphml
+*.html
+*_statistics.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+.venv/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
