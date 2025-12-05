@@ -33,8 +33,7 @@ instance_graph = CORPUS_CONFIG.INSTANCE_ONLY_GRAPH_PATH  # instance only graph p
 # FILE PATHS
 # ============================================================================
 META_GRAPH_PATH = str(meta_graph)
-OUTPUT_FOLDER = r"X:\PhD\SemioMeme_Graph\04_Analysis\meta_semantic_queries"
-
+OUTPUT_FOLDER = [UPDATE PATH]
 # Target entity to analyze
 TARGET_ENTITY = "elon_musk"
 
