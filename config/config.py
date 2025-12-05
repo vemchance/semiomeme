@@ -25,7 +25,7 @@ class Config:
     CORPUS_OUTPUT_DIR = OUTPUTS_ROOT / 'corpus'
 
     # External dataset paths (use environment variables for portability)
-    KYM_DATA_DIR = Path('X:/PhD/Datasets/Memes/KYM')
+    KYM_DATA_DIR = Path('Datasets/Memes/KYM') # UPDATE TO YOUR PATH
 
     # ==================== SHARED SETTINGS ====================
 
