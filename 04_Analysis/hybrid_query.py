@@ -31,8 +31,8 @@ from config.namespaces import SMO, EX, SCHEMA
 from config.config import CORPUS_CONFIG
 from corpus_faiss_similarity_queries import SimilaritySearch
 
-OUTPUT_DIR = Path(r"X:\PhD\SemioMeme_Graph\04_Analysis\semantic_lineage")
-DATASET_BASE_DIR = Path(r"X:\PhD\Datasets\Memes\KYM\Confirmed Images")
+OUTPUT_DIR = Path([UPDATE PATH])
+DATASET_BASE_DIR = Path([UPDATE PATH])
 
 
 class SemanticLineage:
@@ -459,7 +459,7 @@ class SemanticLineage:
 
 
 def main():
-    QUERY_IMAGE = r"X:\Downloads\kek.png"
+    QUERY_IMAGE = [UPDATE PATH]
     QUERY_TEXT = None
     K = 50
 
