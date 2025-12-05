@@ -53,8 +53,8 @@ vision_model = CORPUS_CONFIG.VISION_MODEL_PATH
 text_model = CORPUS_CONFIG.TEXT_MODEL_PATH
 
 # Output and dataset paths
-output_dir = r"X:\PhD\SemioMeme_Graph\04_Analysis\similarity_queries"
-dataset_base_dir = r"X:\PhD\Datasets\Memes\KYM\Confirmed Images"
+output_dir = [UPDATE PATH]
+dataset_base_dir =  [UPDATE PATH]
 
 
 class SimilaritySearch:
