@@ -475,7 +475,7 @@ def main():
     SEARCH_MODE = 'all'
 
     # Query inputs
-    QUERY_IMAGE = r"X:\Downloads\pepe.png"
+    QUERY_IMAGE = [UPDATE PATH]
     QUERY_TEXT = "make america great"
 
     # Search parameters
