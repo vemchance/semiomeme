@@ -733,15 +733,26 @@ def train_text(mode=None):
                 best_val_accuracy = val_accuracy
                 patience_counter = 0
 
+                # Explicit model architecture config for reliable loading
+                model_config = {
+                    'input_dim': TRAIN_CONFIG['input_dim'],
+                    'hidden_dim': TRAIN_CONFIG['hidden_dim'],
+                    'output_dim': TRAIN_CONFIG['output_dim'],
+                    'num_hidden_layers': TRAIN_CONFIG['num_hidden_layers'],
+                    'dropout': TRAIN_CONFIG['dropout'],
+                }
+
                 best_model_name = f'best_text_{model_descriptor}_acc{val_accuracy:.4f}.pth'
                 checkpoint = {
                     'epoch': epoch + 1,
                     'model_state_dict': model.state_dict(),
+                    'model_config': model_config,  # Explicit architecture params
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'val_accuracy': val_accuracy,
                     'train_loss': avg_train_loss,
-                    'config': TRAIN_CONFIG,
+                    'config': {k: str(v) if isinstance(v, Path) else v
+                               for k, v in TRAIN_CONFIG.items()},
                     'model_descriptor': model_descriptor,
                     'dataset_info': {
                         'num_train': len(train_dataset),
@@ -767,11 +778,21 @@ def train_text(mode=None):
             break
 
     # Save final model
+    model_config = {
+        'input_dim': TRAIN_CONFIG['input_dim'],
+        'hidden_dim': TRAIN_CONFIG['hidden_dim'],
+        'output_dim': TRAIN_CONFIG['output_dim'],
+        'num_hidden_layers': TRAIN_CONFIG['num_hidden_layers'],
+        'dropout': TRAIN_CONFIG['dropout'],
+    }
+
     final_model_name = f'final_text_{model_descriptor}_epochs{epoch + 1}_acc{best_val_accuracy:.4f}.pth'
     final_checkpoint = {
         'model_state_dict': model.state_dict(),
+        'model_config': model_config,
         'history': history,
-        'config': TRAIN_CONFIG,
+        'config': {k: str(v) if isinstance(v, Path) else v
+                   for k, v in TRAIN_CONFIG.items()},
         'model_descriptor': model_descriptor,
         'final_epoch': epoch + 1,
         'best_val_accuracy': best_val_accuracy,
