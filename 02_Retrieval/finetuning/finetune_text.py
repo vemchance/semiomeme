@@ -39,6 +39,7 @@ TEXT_INDEX_DIR = RETRIEVAL_CONFIG.TEXT_INDEX_DIR
 # ============================================================================
 # Options: 'confirmed', 'unconfirmed', 'combined'
 TRAINING_MODE = 'combined'
+SKIP_VALIDATION = True
 # ============================================================================
 
 # ============================================================================
@@ -65,7 +66,7 @@ TRAIN_CONFIG = {
     'input_dim': 768,
     'hidden_dim': 3072,
     'output_dim': 768,
-    'num_hidden_layers': 3,
+    'num_hidden_layers': 2,
     'dropout': 0.2,
 
     # Optimizer parameters
@@ -348,7 +349,7 @@ class TextEmbeddingDataset(Dataset):
 
 
 # ============================================================================
-# MODEL
+# MODEL - ORIGINAL DEFINITION (DO NOT MODIFY)
 # ============================================================================
 
 class TextProjectionHead(nn.Module):
@@ -356,42 +357,32 @@ class TextProjectionHead(nn.Module):
                  num_hidden_layers=3, dropout=0.2):
         super().__init__()
 
+        # Build layers based on num_hidden_layers
         layers = []
 
         # First layer
-        layers.extend([
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        ])
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(nn.BatchNorm1d(hidden_dim))
+        layers.append(nn.ReLU())
+        layers.append(nn.Dropout(dropout))
 
-        # Middle layers
+        # Hidden layers
         for _ in range(num_hidden_layers - 1):
-            layers.extend([
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ])
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
 
-        # Final projection
-        layers.extend([
-            nn.Linear(hidden_dim, output_dim),
-            nn.BatchNorm1d(output_dim)
-        ])
+        # Output layer
+        layers.append(nn.Linear(hidden_dim, output_dim))
 
         self.layers = nn.Sequential(*layers)
-        self.alpha = nn.Parameter(torch.tensor(0.0))
+        self.residual_weight = nn.Parameter(torch.tensor(0.3))
 
     def forward(self, x):
         transformed = self.layers(x)
-        if self.alpha > 0:
-            out = transformed + self.alpha * x
-        else:
-            out = transformed
-        out = F.normalize(out, p=2, dim=1)
-        return out
+        out = x * (1 - self.residual_weight) + transformed * self.residual_weight
+        return F.normalize(out, p=2, dim=1)
 
 
 # ============================================================================
@@ -416,10 +407,13 @@ def get_model_descriptor(config, mode):
     loss_short = loss_map.get(config['loss_type'], config['loss_type'])
     miner_short = miner_map.get(config['miner_type'], 'NoMiner')
 
-    descriptor = f"{mode}_{loss_short}_{miner_short}_{config['hidden_dim']}d"
+    descriptor = f"{mode}_Text_{loss_short}_{config['hidden_dim']}d"
 
     if config['num_hidden_layers'] > 1:
         descriptor += f"x{config['num_hidden_layers']}"
+
+    if config['augmentation_prob'] > 0:
+        descriptor += "_aug"
 
     return descriptor
 
@@ -528,7 +522,6 @@ def validate_retrieval_accuracy_with_faiss(model, train_loader, val_loader, devi
     recall_10 /= len(val_labels)
 
     # MRR - Mean Reciprocal Rank
-    # For each val query, find rank of first correct match in train set
     _, all_indices = similarities.topk(similarities.size(1), dim=1)
     reciprocal_ranks = []
     for i in range(len(val_labels)):
@@ -536,7 +529,7 @@ def validate_retrieval_accuracy_with_faiss(model, train_loader, val_loader, devi
         retrieved_labels = train_labels[all_indices[i]]
         matches = (retrieved_labels == query_label).nonzero(as_tuple=True)[0]
         if len(matches) > 0:
-            rank = matches[0].item() + 1  # 1-indexed
+            rank = matches[0].item() + 1
             reciprocal_ranks.append(1.0 / rank)
         else:
             reciprocal_ranks.append(0.0)
@@ -566,6 +559,7 @@ def train_text(mode=None):
     print(f"\n{'=' * 70}")
     print(f"TEXT EMBEDDING FINE-TUNING")
     print(f"Mode: {mode.upper()}")
+    print(f"Skip Validation: {SKIP_VALIDATION}")
     print('=' * 70)
 
     device = torch.device(TRAIN_CONFIG['device'])
@@ -713,7 +707,7 @@ def train_text(mode=None):
         print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.2e}")
 
         # Validation
-        if (epoch + 1) % TRAIN_CONFIG['validate_every_n_epochs'] == 0:
+        if not SKIP_VALIDATION and (epoch + 1) % TRAIN_CONFIG['validate_every_n_epochs'] == 0:
             val_metrics = validate_retrieval_accuracy_with_faiss(
                 model, train_loader, val_loader, device
             )
@@ -746,7 +740,7 @@ def train_text(mode=None):
                 checkpoint = {
                     'epoch': epoch + 1,
                     'model_state_dict': model.state_dict(),
-                    'model_config': model_config,  # Explicit architecture params
+                    'model_config': model_config,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'val_accuracy': val_accuracy,
@@ -772,7 +766,7 @@ def train_text(mode=None):
                 patience_counter += 1
                 print(f"  Patience: {patience_counter}/{TRAIN_CONFIG['patience']}")
 
-        if patience_counter >= TRAIN_CONFIG['patience']:
+        if not SKIP_VALIDATION and patience_counter >= TRAIN_CONFIG['patience']:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
             print(f"Best validation accuracy: {best_val_accuracy:.4f}")
             break
@@ -786,7 +780,7 @@ def train_text(mode=None):
         'dropout': TRAIN_CONFIG['dropout'],
     }
 
-    final_model_name = f'final_text_{model_descriptor}_epochs{epoch + 1}_acc{best_val_accuracy:.4f}.pth'
+    final_model_name = f'final_text_{model_descriptor}_epochs{epoch + 1}.pth'
     final_checkpoint = {
         'model_state_dict': model.state_dict(),
         'model_config': model_config,
@@ -800,6 +794,8 @@ def train_text(mode=None):
     }
 
     torch.save(final_checkpoint, save_dir / final_model_name)
+    # Also save as text_model.pth for easy loading
+    torch.save(final_checkpoint, save_dir / 'text_model.pth')
 
     # Save training history
     history_name = f'history_text_{model_descriptor}.json'
@@ -814,7 +810,6 @@ def train_text(mode=None):
     print(f"Best validation accuracy: {best_val_accuracy:.4f}")
     print(f"Final train loss: {history['train_loss'][-1]:.4f}")
     print(f"Models saved to: {save_dir}")
-    print(f"  Best model: best_text_{model_descriptor}_acc{best_val_accuracy:.4f}.pth")
     print(f"  Final model: {final_model_name}")
     print("=" * 70)
 
