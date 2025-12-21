@@ -1,7 +1,6 @@
 """
-Fine-tuning text embeddings for meme retrieval
-Optimized for noisy OCR data with text augmentation
-Follows the same structure as finetune_siglip.py
+Fine-tuning text embeddings with configurable data source
+Supports: confirmed, unconfirmed, or combined meme datasets
 """
 
 import os
@@ -24,30 +23,42 @@ import json
 import random
 import re
 import sys
+
 # PyTorch Metric Learning
 from pytorch_metric_learning import distances, losses, miners
 
 sys.path.append(str(Path(__file__).parent.parent))
 from config.config import RETRIEVAL_CONFIG
 
-# Use config paths
 TEXT_EMBEDDINGS_DIR = RETRIEVAL_CONFIG.TEXT_EMBEDDINGS_DIR
 TEXT_METADATA_DIR = RETRIEVAL_CONFIG.TEXT_METADATA_DIR
 TEXT_INDEX_DIR = RETRIEVAL_CONFIG.TEXT_INDEX_DIR
+
+# ============================================================================
+# TRAINING MODE - SET THIS BEFORE RUNNING
+# ============================================================================
+# Options: 'confirmed', 'unconfirmed', 'combined'
+TRAINING_MODE = 'combined'
+# ============================================================================
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+
+def get_save_dir(mode):
+    """Get save directory based on training mode"""
+    return RETRIEVAL_CONFIG.OUTPUT_DIR / 'finetuned_models' / 'text' / mode
+
 
 TRAIN_CONFIG = {
     # Data parameters
     'batch_size': 9028,
     'val_batch_size': 9028,
-    'num_epochs': 200,
+    'num_epochs': 10,
     'random_seed': 42,
 
-    # FILTERING - Confirmed only, with quality thresholds
-    'use_only_confirmed': True,
-    'min_text_length': 3,  # Minimum words for training
+    # Quality thresholds
+    'min_text_length': 3,  # Minimum words
     'min_char_length': 10,  # Minimum characters
 
     # Model parameters
@@ -58,28 +69,28 @@ TRAIN_CONFIG = {
     'dropout': 0.2,
 
     # Optimizer parameters
-    'learning_rate': 1e-4,  # Lower LR for noisy data
+    'learning_rate': 1e-4,
     'weight_decay': 0.01,
 
     'loss_type': 'SupConLoss',
     'temperature': 0.07,
     'miner_type': None,
-    'miner_epsilon': 0.1,  # Not used for TripletMarginMiner
+    'miner_epsilon': 0.1,
     'miner_margin': 0.7,
     'miner_triplet_type': 'semihard',
 
     # Text augmentation parameters
-    'augmentation_prob': 0.3,  # Probability of augmenting each sample
-    'token_dropout_prob': 0.1,  # Probability of dropping each token
-    'char_noise_prob': 0.05,  # Probability of character-level noise
+    'augmentation_prob': 0.3,
+    'token_dropout_prob': 0.1,
+    'char_noise_prob': 0.05,
 
     # System parameters
     'num_workers': 2,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 
-    # Saving parameters - matches image model structure
-    'save_dir': RETRIEVAL_CONFIG.OUTPUT_DIR / 'finetuned_models' / 'text',
-    'save_checkpoints': False,  # No intermediate checkpoints
+    # Saving parameters
+    'save_dir': get_save_dir(TRAINING_MODE),
+    'save_checkpoints': False,
     'patience': 15,
 
     # Validation
@@ -96,53 +107,43 @@ class TextAugmenter:
 
     @staticmethod
     def random_case(text):
-        """Random case changes to handle meme text variations"""
         if random.random() < 0.5:
             return text.upper()
         elif random.random() < 0.5:
             return text.lower()
         else:
-            # Random mixed case
             return ''.join(c.upper() if random.random() < 0.5 else c.lower() for c in text)
 
     @staticmethod
     def token_dropout(text, dropout_prob=0.1):
-        """Randomly drop tokens to simulate incomplete OCR"""
         tokens = text.split()
-        if len(tokens) <= 2:  # Don't dropout very short texts
+        if len(tokens) <= 2:
             return text
         kept_tokens = [t for t in tokens if random.random() > dropout_prob]
         return ' '.join(kept_tokens) if kept_tokens else text
 
     @staticmethod
     def char_noise(text, noise_prob=0.05):
-        """Add character-level noise to simulate OCR errors"""
         if not text:
             return text
 
         chars = list(text)
         for i in range(len(chars)):
             if random.random() < noise_prob:
-                # Random char substitution/deletion
                 if random.random() < 0.5 and i > 0:
-                    # Swap with adjacent
                     chars[i], chars[i - 1] = chars[i - 1], chars[i]
                 elif random.random() < 0.3:
-                    # Delete (replace with space)
                     chars[i] = ' '
 
-        # Clean up multiple spaces
         result = ''.join(chars)
         result = re.sub(r'\s+', ' ', result)
         return result.strip()
 
     @staticmethod
     def augment(text, config):
-        """Apply random augmentation based on config"""
         if random.random() > config['augmentation_prob']:
-            return text  # No augmentation
+            return text
 
-        # Apply one or more augmentations
         if random.random() < 0.5:
             text = TextAugmenter.random_case(text)
 
@@ -159,17 +160,18 @@ class TextAugmenter:
 # DATASET
 # ============================================================================
 
-class ConfirmedTextEmbeddingDataset(Dataset):
-    """Dataset for fine-tuning text embeddings with quality filtering"""
+class TextEmbeddingDataset(Dataset):
+    """Dataset for fine-tuning text embeddings based on training mode"""
 
-    def __init__(self, split='train', max_chunks=None, apply_augmentation=True):
+    def __init__(self, split='train', mode='confirmed', max_chunks=None, apply_augmentation=True):
         self.split = split
+        self.mode = mode
         self.apply_augmentation = apply_augmentation and (split == 'train')
         self.samples = []
         self.class_to_idx = {}
 
         print(f"\n{'=' * 60}")
-        print(f"Loading {split.upper()} Text Dataset - CONFIRMED ONLY")
+        print(f"Loading {split.upper()} Text Dataset - MODE: {mode.upper()}")
         print('=' * 60)
 
         # Get all chunk files
@@ -192,26 +194,42 @@ class ConfirmedTextEmbeddingDataset(Dataset):
         # Statistics
         total_texts = 0
         confirmed_texts = 0
+        unconfirmed_texts = 0
+        included_texts = 0
         filtered_texts = 0
 
         # Load chunks and filter
         for emb_file, meta_file in tqdm(zip(embedding_files, metadata_files),
                                         total=len(embedding_files),
                                         desc="Loading and filtering"):
-            # Load embeddings
             chunk_embeddings = np.load(emb_file)
 
-            # Load metadata
             with open(meta_file, 'r') as f:
                 chunk_metadata = json.load(f)
 
-            # Filter: Only confirmed texts with sufficient quality
             for i, text_meta in enumerate(chunk_metadata['valid_texts']):
                 total_texts += 1
 
-                # Check if confirmed
+                # Determine text type from metadata
                 dataset_type = text_meta.get('dataset_type', 'unknown')
-                if dataset_type != 'confirmed':
+                is_confirmed = dataset_type == 'confirmed'
+                is_unconfirmed = dataset_type == 'unconfirmed'
+
+                if is_confirmed:
+                    confirmed_texts += 1
+                elif is_unconfirmed:
+                    unconfirmed_texts += 1
+
+                # Filter based on mode
+                include = False
+                if mode == 'confirmed' and is_confirmed:
+                    include = True
+                elif mode == 'unconfirmed' and is_unconfirmed:
+                    include = True
+                elif mode == 'combined' and (is_confirmed or is_unconfirmed):
+                    include = True
+
+                if not include:
                     continue
 
                 # Quality checks
@@ -219,7 +237,6 @@ class ConfirmedTextEmbeddingDataset(Dataset):
                 word_count = text_meta.get('word_count', 0)
                 text_length = text_meta.get('text_length', 0)
 
-                # Apply minimum thresholds
                 if word_count < TRAIN_CONFIG['min_text_length']:
                     filtered_texts += 1
                     continue
@@ -233,17 +250,19 @@ class ConfirmedTextEmbeddingDataset(Dataset):
                     filtered_texts += 1
                     continue
 
-                confirmed_texts += 1
+                included_texts += 1
                 all_embeddings.append(chunk_embeddings[i])
                 all_metadata.append(text_meta)
 
         print(f"\nFiltering Results:")
         print(f"  Total texts scanned: {total_texts:,}")
-        print(f"  Confirmed texts found: {confirmed_texts:,}")
-        print(f"  Texts filtered (too short/low quality): {filtered_texts:,}")
+        print(f"  Confirmed texts: {confirmed_texts:,}")
+        print(f"  Unconfirmed texts: {unconfirmed_texts:,}")
+        print(f"  Filtered (too short/low quality): {filtered_texts:,}")
+        print(f"  Included for training ({mode}): {included_texts:,}")
 
-        if confirmed_texts == 0:
-            raise ValueError("No confirmed texts passed quality filters!")
+        if included_texts == 0:
+            raise ValueError(f"No texts passed quality filters for mode: {mode}")
 
         # Stack embeddings
         self.embeddings = np.vstack(all_embeddings)
@@ -282,7 +301,6 @@ class ConfirmedTextEmbeddingDataset(Dataset):
                         'text': sample_data['text']
                     })
             else:
-                # Deterministic split
                 class_seed = 42 + hash(class_id) % 10000
                 rng = np.random.RandomState(class_seed)
                 indices = rng.permutation(n_samples)
@@ -291,7 +309,7 @@ class ConfirmedTextEmbeddingDataset(Dataset):
 
                 if split == 'train':
                     selected_indices = indices[:n_train]
-                else:  # val
+                else:
                     selected_indices = indices[n_train:]
 
                 for idx in selected_indices:
@@ -320,16 +338,10 @@ class ConfirmedTextEmbeddingDataset(Dataset):
         embedding = self.embeddings[sample['embedding_idx']]
         label = sample['label']
 
-        # Apply augmentation during training
         if self.apply_augmentation:
-            # Note: We augment the text conceptually, but since we're using
-            # pre-computed embeddings, we'll add small noise to embeddings
-            # to simulate text variations
             if random.random() < TRAIN_CONFIG['augmentation_prob']:
-                # Add small Gaussian noise to embedding
                 noise = np.random.normal(0, 0.01, embedding.shape)
                 embedding = embedding + noise
-                # Re-normalize
                 embedding = embedding / (np.linalg.norm(embedding) + 1e-8)
 
         return torch.from_numpy(embedding).float(), label
@@ -344,206 +356,248 @@ class TextProjectionHead(nn.Module):
                  num_hidden_layers=3, dropout=0.2):
         super().__init__()
 
-        # Build layers based on num_hidden_layers
         layers = []
 
         # First layer
-        layers.append(nn.Linear(input_dim, hidden_dim))
-        layers.append(nn.BatchNorm1d(hidden_dim))
-        layers.append(nn.ReLU())
-        layers.append(nn.Dropout(dropout))
+        layers.extend([
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        ])
 
-        # Hidden layers
+        # Middle layers
         for _ in range(num_hidden_layers - 1):
-            layers.append(nn.Linear(hidden_dim, hidden_dim))
-            layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
+            layers.extend([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
 
-        # Output layer
-        layers.append(nn.Linear(hidden_dim, output_dim))
+        # Final projection
+        layers.extend([
+            nn.Linear(hidden_dim, output_dim),
+            nn.BatchNorm1d(output_dim)
+        ])
 
         self.layers = nn.Sequential(*layers)
-        self.residual_weight = nn.Parameter(torch.tensor(0.3))
+        self.alpha = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x):
         transformed = self.layers(x)
-        out = x * (1 - self.residual_weight) + transformed * self.residual_weight
-        return F.normalize(out, p=2, dim=1)
+        if self.alpha > 0:
+            out = transformed + self.alpha * x
+        else:
+            out = transformed
+        out = F.normalize(out, p=2, dim=1)
+        return out
 
 
 # ============================================================================
-# TRAINING UTILITIES
+# UTILITY FUNCTIONS
 # ============================================================================
 
-def get_model_descriptor(config):
-    """Create descriptive string for model configuration"""
+def get_model_descriptor(config, mode):
+    """Create a descriptive string for the model configuration"""
     loss_map = {
-        'NTXentLoss': 'NTXent',
-        'ContrastiveLoss': 'Contrastive',
         'MultiSimilarityLoss': 'MSLoss',
-        'SupConLoss': 'SupConLoss'
+        'NTXentLoss': 'NTXent',
+        'TripletMarginLoss': 'Triplet',
+        'SupConLoss': 'SupCon'
+    }
+
+    miner_map = {
+        'MultiSimilarityMiner': 'MSMiner',
+        'TripletMarginMiner': 'TripMiner',
+        None: 'NoMiner'
     }
 
     loss_short = loss_map.get(config['loss_type'], config['loss_type'])
+    miner_short = miner_map.get(config['miner_type'], 'NoMiner')
 
-    descriptor = f"Text_{loss_short}_{config['hidden_dim']}d"
+    descriptor = f"{mode}_{loss_short}_{miner_short}_{config['hidden_dim']}d"
 
-    if config['augmentation_prob'] > 0:
-        descriptor += "_aug"
+    if config['num_hidden_layers'] > 1:
+        descriptor += f"x{config['num_hidden_layers']}"
 
     return descriptor
 
 
 def get_loss_and_miner(config):
-    """Initialize loss function and miner for text training"""
-
+    """Initialize loss function and miner"""
     distance = distances.CosineSimilarity()
 
     if config['loss_type'] == 'SupConLoss':
         loss_fn = losses.SupConLoss(
-            temperature=0.05,  # Lower temperature often better
-            distance=distance
-        )
-    # Loss function - NTXent recommended for noisy text
-    elif config['loss_type'] == 'NTXentLoss':
-        loss_fn = losses.NTXentLoss(
             temperature=config['temperature'],
-            distance=distance
-        )
-    elif config['loss_type'] == 'ContrastiveLoss':
-        loss_fn = losses.ContrastiveLoss(
-            pos_margin=0.0,
-            neg_margin=1.0,
             distance=distance
         )
     elif config['loss_type'] == 'MultiSimilarityLoss':
         loss_fn = losses.MultiSimilarityLoss(
-            alpha=2, beta=50, base=0.5,
-            distance=distance
+            alpha=2, beta=50, base=0.5, distance=distance
+        )
+    elif config['loss_type'] == 'NTXentLoss':
+        loss_fn = losses.NTXentLoss(
+            temperature=config['temperature'], distance=distance
+        )
+    elif config['loss_type'] == 'TripletMarginLoss':
+        loss_fn = losses.TripletMarginLoss(
+            margin=0.1, distance=distance
         )
     else:
         raise ValueError(f"Unknown loss type: {config['loss_type']}")
 
-    # Miner (optional for text)
     if config['miner_type'] == 'MultiSimilarityMiner':
         miner = miners.MultiSimilarityMiner(
             epsilon=config['miner_epsilon'], distance=distance
         )
     elif config['miner_type'] == 'TripletMarginMiner':
         miner = miners.TripletMarginMiner(
-            margin=config.get('miner_margin', 0.5),  # Use config value, default 0.5
+            margin=config.get('miner_margin', 0.5),
             distance=distance,
-            type_of_triplets=config.get('miner_triplet_type', 'hard')  # Use 'hard' instead of 'semihard'
+            type_of_triplets=config.get('miner_triplet_type', 'hard')
         )
     else:
         miner = None
 
     print(f"Loss function: {config['loss_type']}")
-    print(f"Miner: {config['miner_type'] if miner else 'None'}")
+    if miner:
+        print(f"Miner: {config['miner_type']}")
+    else:
+        print("No miner")
 
     return loss_fn, miner
 
 
 def validate_retrieval_accuracy_with_faiss(model, train_loader, val_loader, device):
-    """Validation using FAISS indices"""
-    import faiss
-
+    """Validate using retrieval accuracy, recall, and MRR"""
     model.eval()
 
-    # Collect train embeddings
+    # Collect all training embeddings for reference
     train_embeddings = []
     train_labels = []
 
     with torch.no_grad():
-        for embeddings, labels in tqdm(train_loader, desc="  Collecting train embeddings", leave=False):
+        for embeddings, labels in train_loader:
             embeddings = embeddings.to(device)
             projected = model(embeddings)
-            projected = torch.nn.functional.normalize(projected, p=2, dim=1)
-            train_embeddings.append(projected.cpu().numpy())
-            train_labels.extend(labels.numpy())
+            train_embeddings.append(projected.cpu())
+            train_labels.append(labels)
 
-    train_embeddings = np.vstack(train_embeddings).astype('float32')
-    train_labels = np.array(train_labels)
+    train_embeddings = torch.cat(train_embeddings, dim=0)
+    train_labels = torch.cat(train_labels, dim=0)
 
-    # Build FAISS index
-    print(f"  Building FAISS index with {len(train_embeddings)} vectors...", end="")
-    d = train_embeddings.shape[1]
-    train_index = faiss.IndexFlatL2(d)
-    train_index.add(train_embeddings)
-    print(" Done")
-
-    # Collect val embeddings
+    # Collect validation embeddings
     val_embeddings = []
     val_labels = []
 
     with torch.no_grad():
-        for embeddings, labels in tqdm(val_loader, desc="  Collecting val embeddings", leave=False):
+        for embeddings, labels in val_loader:
             embeddings = embeddings.to(device)
             projected = model(embeddings)
-            projected = torch.nn.functional.normalize(projected, p=2, dim=1)
-            val_embeddings.append(projected.cpu().numpy())
-            val_labels.extend(labels.numpy())
+            val_embeddings.append(projected.cpu())
+            val_labels.append(labels)
 
-    val_embeddings = np.vstack(val_embeddings).astype('float32')
-    val_labels = np.array(val_labels)
+    val_embeddings = torch.cat(val_embeddings, dim=0)
+    val_labels = torch.cat(val_labels, dim=0)
 
-    # Search
-    print(f"  Searching {len(val_embeddings)} queries...", end="")
-    k = 1
-    distances, indices = train_index.search(val_embeddings, k)
-    print(" Done")
+    # Compute similarities between val and train
+    similarities = torch.mm(val_embeddings, train_embeddings.t())
 
-    # Calculate accuracy
-    predicted_labels = train_labels[indices.squeeze()]
-    correct = (predicted_labels == val_labels).sum()
-    accuracy = correct / len(val_labels)
+    # Get top-k indices
+    k_max = min(10, similarities.size(1))
+    _, top1_indices = similarities.topk(1, dim=1)
+    _, top5_indices = similarities.topk(min(5, k_max), dim=1)
+    _, top10_indices = similarities.topk(k_max, dim=1)
+
+    # Recall@1
+    predictions = train_labels[top1_indices.squeeze()]
+    recall_1 = (predictions == val_labels).float().mean().item()
+
+    # Recall@5 and Recall@10
+    recall_5 = 0
+    recall_10 = 0
+    for i in range(len(val_labels)):
+        if val_labels[i] in train_labels[top5_indices[i]]:
+            recall_5 += 1
+        if val_labels[i] in train_labels[top10_indices[i]]:
+            recall_10 += 1
+
+    recall_5 /= len(val_labels)
+    recall_10 /= len(val_labels)
+
+    # MRR - Mean Reciprocal Rank
+    # For each val query, find rank of first correct match in train set
+    _, all_indices = similarities.topk(similarities.size(1), dim=1)
+    reciprocal_ranks = []
+    for i in range(len(val_labels)):
+        query_label = val_labels[i]
+        retrieved_labels = train_labels[all_indices[i]]
+        matches = (retrieved_labels == query_label).nonzero(as_tuple=True)[0]
+        if len(matches) > 0:
+            rank = matches[0].item() + 1  # 1-indexed
+            reciprocal_ranks.append(1.0 / rank)
+        else:
+            reciprocal_ranks.append(0.0)
+
+    mrr = np.mean(reciprocal_ranks)
 
     model.train()
-    return accuracy
+
+    return {
+        'accuracy': recall_1,
+        'recall@1': recall_1,
+        'recall@5': recall_5,
+        'recall@10': recall_10,
+        'mrr': mrr
+    }
 
 
 # ============================================================================
-# MAIN TRAINING FUNCTION
+# TRAINING
 # ============================================================================
 
-def train_text():
+def train_text(mode=None):
     """Main training function for text embeddings"""
+    if mode is None:
+        mode = TRAINING_MODE
 
-    # Get model descriptor
-    model_descriptor = get_model_descriptor(TRAIN_CONFIG)
-
-    print("\n" + "=" * 70)
-    print("FINE-TUNING")
-    print(f"Configuration: {model_descriptor}")
-    print("=" * 70)
+    print(f"\n{'=' * 70}")
+    print(f"TEXT EMBEDDING FINE-TUNING")
+    print(f"Mode: {mode.upper()}")
+    print('=' * 70)
 
     device = torch.device(TRAIN_CONFIG['device'])
-    print(f"\nDevice: {device}")
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"Using device: {device}")
 
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = TRAIN_CONFIG['save_dir'] / f"{model_descriptor}_{timestamp}"
+    # Update save directory for this mode
+    save_dir = get_save_dir(mode)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nSave directory: {save_dir}")
+    # Create model descriptor
+    model_descriptor = get_model_descriptor(TRAIN_CONFIG, mode)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    print(f"\nModel configuration: {model_descriptor}")
+    print(f"Saving to: {save_dir}")
 
     # Save configuration
     with open(save_dir / 'config.json', 'w') as f:
         config_to_save = {k: str(v) if isinstance(v, Path) else v
                           for k, v in TRAIN_CONFIG.items()}
+        config_to_save['mode'] = mode
         config_to_save['model_descriptor'] = model_descriptor
         config_to_save['timestamp'] = timestamp
         json.dump(config_to_save, f, indent=2)
 
-    # Load datasets
-    train_dataset = ConfirmedTextEmbeddingDataset(split='train', apply_augmentation=True)
-    val_dataset = ConfirmedTextEmbeddingDataset(split='val', apply_augmentation=False)
+    # Load datasets with mode
+    train_dataset = TextEmbeddingDataset(split='train', mode=mode, apply_augmentation=True)
+    val_dataset = TextEmbeddingDataset(split='val', mode=mode, apply_augmentation=False)
 
     print(f"\n{'=' * 60}")
     print(f"Dataset Summary:")
+    print(f"  Mode: {mode}")
     print(f"  Train: {len(train_dataset)} samples (with augmentation)")
     print(f"  Val: {len(val_dataset)} samples")
     print(f"  Total classes: {len(train_dataset.class_to_idx)}")
@@ -587,7 +641,7 @@ def train_text():
     if miner:
         miner = miner.to(device)
 
-    # Optimizer - lower learning rate for noisy data
+    # Optimizer
     optimizer = AdamW(
         model.parameters(),
         lr=TRAIN_CONFIG['learning_rate'],
@@ -605,7 +659,8 @@ def train_text():
         'train_loss': [],
         'val_accuracy': [],
         'learning_rates': [],
-        'config': model_descriptor
+        'config': model_descriptor,
+        'mode': mode
     }
 
     # Training loop
@@ -616,7 +671,6 @@ def train_text():
         epoch_loss = 0
         num_batches = 0
 
-        # Training
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{TRAIN_CONFIG['num_epochs']}")
 
@@ -624,43 +678,32 @@ def train_text():
             embeddings = embeddings.to(device)
             labels = labels.to(device)
 
-            # Forward pass
             optimizer.zero_grad()
             projected = model(embeddings)
 
-            # Mining and loss
             if miner:
                 hard_pairs = miner(projected, labels)
                 loss = loss_fn(projected, labels, hard_pairs)
             else:
                 loss = loss_fn(projected, labels)
 
-            # Skip invalid losses
             if not torch.isfinite(loss) or loss.item() < 1e-8:
                 continue
 
-            # Backward pass
             loss.backward()
-
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            # Update
             optimizer.step()
             scheduler.step()
 
-            # Track
             epoch_loss += loss.item()
             num_batches += 1
 
-            # Update progress bar
             current_lr = scheduler.get_last_lr()[0]
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
                 'lr': f"{current_lr:.2e}"
             })
 
-        # Epoch metrics
         avg_train_loss = epoch_loss / max(num_batches, 1)
         history['train_loss'].append(avg_train_loss)
         history['learning_rates'].append(scheduler.get_last_lr()[0])
@@ -671,19 +714,25 @@ def train_text():
 
         # Validation
         if (epoch + 1) % TRAIN_CONFIG['validate_every_n_epochs'] == 0:
-            val_accuracy = validate_retrieval_accuracy_with_faiss(
+            val_metrics = validate_retrieval_accuracy_with_faiss(
                 model, train_loader, val_loader, device
             )
+            val_accuracy = val_metrics['accuracy']
             history['val_accuracy'].append(val_accuracy)
+            history.setdefault('val_recall@1', []).append(val_metrics['recall@1'])
+            history.setdefault('val_recall@5', []).append(val_metrics['recall@5'])
+            history.setdefault('val_recall@10', []).append(val_metrics['recall@10'])
+            history.setdefault('val_mrr', []).append(val_metrics['mrr'])
 
-            print(f"  Val Accuracy: {val_accuracy:.4f}")
+            print(f"  Val Recall@1: {val_metrics['recall@1']:.4f}")
+            print(f"  Val Recall@5: {val_metrics['recall@5']:.4f}")
+            print(f"  Val Recall@10: {val_metrics['recall@10']:.4f}")
+            print(f"  Val MRR: {val_metrics['mrr']:.4f}")
 
-            # Save best model
             if val_accuracy > best_val_accuracy:
                 best_val_accuracy = val_accuracy
                 patience_counter = 0
 
-                # Save with descriptive name
                 best_model_name = f'best_text_{model_descriptor}_acc{val_accuracy:.4f}.pth'
                 checkpoint = {
                     'epoch': epoch + 1,
@@ -698,7 +747,7 @@ def train_text():
                         'num_train': len(train_dataset),
                         'num_val': len(val_dataset),
                         'num_classes': len(train_dataset.class_to_idx),
-                        'confirmed_only': True,
+                        'mode': mode,
                         'min_text_length': TRAIN_CONFIG['min_text_length']
                     }
                 }
@@ -707,13 +756,11 @@ def train_text():
                 torch.save(checkpoint, save_path)
                 print(f"  [SAVED] New best model: {best_model_name}")
 
-                # Also save as 'best_model.pth' for easy loading
                 torch.save(checkpoint, save_dir / 'text_model.pth')
             else:
                 patience_counter += 1
                 print(f"  Patience: {patience_counter}/{TRAIN_CONFIG['patience']}")
 
-        # Early stopping
         if patience_counter >= TRAIN_CONFIG['patience']:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
             print(f"Best validation accuracy: {best_val_accuracy:.4f}")
@@ -727,7 +774,8 @@ def train_text():
         'config': TRAIN_CONFIG,
         'model_descriptor': model_descriptor,
         'final_epoch': epoch + 1,
-        'best_val_accuracy': best_val_accuracy
+        'best_val_accuracy': best_val_accuracy,
+        'mode': mode
     }
 
     torch.save(final_checkpoint, save_dir / final_model_name)
@@ -739,6 +787,7 @@ def train_text():
 
     # Print final summary
     print("\n" + "=" * 70)
+    print(f"Mode: {mode.upper()}")
     print(f"Configuration: {model_descriptor}")
     print(f"Total epochs: {epoch + 1}")
     print(f"Best validation accuracy: {best_val_accuracy:.4f}")
@@ -746,7 +795,6 @@ def train_text():
     print(f"Models saved to: {save_dir}")
     print(f"  Best model: best_text_{model_descriptor}_acc{best_val_accuracy:.4f}.pth")
     print(f"  Final model: {final_model_name}")
-    print(f"  Update models.py with new configuration")
     print("=" * 70)
 
     return model, history
@@ -754,7 +802,7 @@ def train_text():
 
 def main():
     """Entry point"""
-    return train_text()
+    return train_text(mode=TRAINING_MODE)
 
 
 if __name__ == "__main__":
