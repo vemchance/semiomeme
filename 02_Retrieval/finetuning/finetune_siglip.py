@@ -1,6 +1,6 @@
 """
-Fine-tuning using ONLY confirmed memes from cached embeddings
-Improved version with better model naming and no checkpoint saving
+Fine-tuning vision embeddings with configurable data source
+Supports: confirmed, unconfirmed, or combined meme datasets
 """
 
 import os
@@ -29,26 +29,39 @@ from pytorch_metric_learning.utils.accuracy_calculator import AccuracyCalculator
 
 sys.path.append(str(Path(__file__).parent.parent))
 from config.config import RETRIEVAL_CONFIG
+
 EMBEDDINGS_DIR = RETRIEVAL_CONFIG.EMBEDDINGS_DIR
 METADATA_DIR = RETRIEVAL_CONFIG.METADATA_DIR
 INDEX_DIR = RETRIEVAL_CONFIG.INDEX_DIR
 
 # ============================================================================
+# TRAINING MODE - SET THIS BEFORE RUNNING
+# ============================================================================
+# Options: 'confirmed', 'unconfirmed', 'combined'
+TRAINING_MODE = ('unconfirmed')
+# ============================================================================
+
+# ============================================================================
 # CONFIGURATION
 # ============================================================================
+
+def get_save_dir(mode):
+    """Get save directory based on training mode"""
+    return RETRIEVAL_CONFIG.OUTPUT_DIR / 'finetuned_models' / 'vision' / mode
+
 
 TRAIN_CONFIG = {
     # Data parameters
     'batch_size': 8192,
     'val_batch_size': 2048,
-    'num_epochs': 200,
+    'num_epochs': 10,
     'random_seed': 42,
     'accumulation_steps': 4,
 
-    # FILTERING - THIS IS KEY!
-    'use_only_confirmed': True,
+    # Filtering patterns
     'confirmed_path_pattern': 'Confirmed Images',
-    'exclude_pattern': 'Unconfirmed',
+    'unconfirmed_path_pattern': 'Unconfirmed Images',
+    'exclude_pattern': 'None',
 
     # Model parameters
     'input_dim': 768,
@@ -64,7 +77,7 @@ TRAIN_CONFIG = {
     'loss_type': 'SupConLoss',
     'temperature': 0.05,
     'miner_type': None,
-    'miner_epsilon': 0.1,  # Not used for TripletMarginMiner
+    'miner_epsilon': 0.1,
     'miner_margin': 0.7,
     'miner_triplet_type': 'semihard',
 
@@ -72,9 +85,9 @@ TRAIN_CONFIG = {
     'num_workers': 2,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 
-    # Saving parameters - NO CHECKPOINTS
-    'save_dir': RETRIEVAL_CONFIG.OUTPUT_DIR / 'finetuned_models' / 'vision',
-    'save_checkpoints': False,  # Disabled
+    # Saving parameters
+    'save_dir': get_save_dir(TRAINING_MODE),
+    'save_checkpoints': False,
     'patience': 10,
 
     # Validation
@@ -86,17 +99,18 @@ TRAIN_CONFIG = {
 # DATASET
 # ============================================================================
 
-class ConfirmedOnlyEmbeddingDataset(Dataset):
-    """Dataset that loads ONLY confirmed meme embeddings"""
+class EmbeddingDataset(Dataset):
+    """Dataset that loads embeddings based on training mode"""
 
-    def __init__(self, split='train', max_chunks=None, verbose=True):
+    def __init__(self, split='train', mode='confirmed', max_chunks=None, verbose=True):
         self.split = split
+        self.mode = mode
         self.samples = []
         self.class_to_idx = {}
 
         if verbose:
             print(f"\n{'=' * 60}")
-            print(f"Loading {split.upper()} Dataset - CONFIRMED ONLY")
+            print(f"Loading {split.upper()} Dataset - MODE: {mode.upper()}")
             print('=' * 60)
 
         # Get all chunk files
@@ -117,49 +131,62 @@ class ConfirmedOnlyEmbeddingDataset(Dataset):
         total_images = 0
         confirmed_images = 0
         unconfirmed_images = 0
+        included_images = 0
 
         # Load chunks and filter
         for emb_file, meta_file in tqdm(zip(embedding_files, metadata_files),
                                         total=len(embedding_files),
                                         desc="Loading and filtering"):
-            # Load embeddings chunk
             chunk_embeddings = np.load(emb_file)
 
-            # Load metadata
             with open(meta_file, 'r') as f:
                 chunk_metadata = json.load(f)
 
-            # FILTER: Only keep confirmed images
             for i, img_meta in enumerate(chunk_metadata['valid_images']):
                 total_images += 1
                 path = img_meta['path']
 
-                # Check if this is a confirmed image
-                is_confirmed = (
-                        TRAIN_CONFIG['confirmed_path_pattern'] in path and
-                        TRAIN_CONFIG['exclude_pattern'] not in path
-                )
+                # Determine image type
+                is_confirmed = TRAIN_CONFIG['confirmed_path_pattern'] in path
+                is_unconfirmed = TRAIN_CONFIG['unconfirmed_path_pattern'] in path
 
                 if is_confirmed:
                     confirmed_images += 1
+                elif is_unconfirmed:
+                    unconfirmed_images += 1
+
+                # Filter based on mode
+                include = False
+                if mode == 'confirmed' and is_confirmed:
+                    include = True
+                elif mode == 'unconfirmed' and is_unconfirmed:
+                    include = True
+                elif mode == 'combined' and (is_confirmed or is_unconfirmed):
+                    include = True
+
+                # Apply exclude pattern
+                if include and TRAIN_CONFIG['exclude_pattern'] in path:
+                    include = False
+
+                if include:
+                    included_images += 1
                     all_embeddings.append(chunk_embeddings[i])
                     all_metadata.append(img_meta)
-                else:
-                    unconfirmed_images += 1
 
         print(f"\nFiltering Results:")
         print(f"  Total images scanned: {total_images:,}")
-        print(f"  Confirmed images kept: {confirmed_images:,}")
-        print(f"  Unconfirmed images excluded: {unconfirmed_images:,}")
+        print(f"  Confirmed images: {confirmed_images:,}")
+        print(f"  Unconfirmed images: {unconfirmed_images:,}")
+        print(f"  Included for training ({mode}): {included_images:,}")
 
-        if confirmed_images == 0:
-            raise ValueError("No confirmed images found.")
+        if included_images == 0:
+            raise ValueError(f"No images found for mode: {mode}")
 
-        # Stack all confirmed embeddings
+        # Stack all embeddings
         self.embeddings = np.vstack(all_embeddings)
         print(f"\nLoaded embeddings shape: {self.embeddings.shape}")
 
-        # Build class mapping from confirmed only
+        # Build class mapping
         unique_classes = set(meta['class_id'] for meta in all_metadata)
         self.class_to_idx = {cls: idx for idx, cls in enumerate(sorted(unique_classes))}
         self.idx_to_class = {idx: cls for cls, idx in self.class_to_idx.items()}
@@ -182,7 +209,6 @@ class ConfirmedOnlyEmbeddingDataset(Dataset):
             n_samples = len(class_samples)
 
             if n_samples == 1:
-                # Only one sample - goes to train
                 if split == 'train':
                     sample_data = class_samples[0]
                     self.samples.append({
@@ -192,7 +218,6 @@ class ConfirmedOnlyEmbeddingDataset(Dataset):
                         'path': sample_data['meta']['path']
                     })
             else:
-                # Multiple samples - stratified split
                 class_seed = 42 + hash(class_id) % 10000
                 rng = np.random.RandomState(class_seed)
                 indices = rng.permutation(n_samples)
@@ -201,7 +226,7 @@ class ConfirmedOnlyEmbeddingDataset(Dataset):
 
                 if split == 'train':
                     selected_indices = indices[:n_train]
-                else:  # val
+                else:
                     selected_indices = indices[n_train:]
 
                 for idx in selected_indices:
@@ -246,24 +271,20 @@ class ProjectionHead(nn.Module):
         super().__init__()
 
         self.layers = nn.Sequential(
-            # First expansion
-            nn.Linear(input_dim, hidden_dim),  # 768 -> 3072
+            nn.Linear(input_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
 
-            # Middle layer (stays wide)
-            nn.Linear(hidden_dim, hidden_dim),  # 3072 -> 3072
+            nn.Linear(hidden_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
 
-            # Final projection
-            nn.Linear(hidden_dim, output_dim),  # 3072 -> 768
+            nn.Linear(hidden_dim, output_dim),
             nn.BatchNorm1d(output_dim)
         )
 
-        # Very small or no residual
         self.alpha = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x):
@@ -280,15 +301,13 @@ class ProjectionHead(nn.Module):
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def get_model_descriptor(config):
-    """
-    Create a descriptive string for the model configuration
-    """
-    # Shorten names for readability
+def get_model_descriptor(config, mode):
+    """Create a descriptive string for the model configuration"""
     loss_map = {
         'MultiSimilarityLoss': 'MSLoss',
         'NTXentLoss': 'NTXent',
-        'TripletMarginLoss': 'Triplet'
+        'TripletMarginLoss': 'Triplet',
+        'SupConLoss': 'SupCon'
     }
 
     miner_map = {
@@ -300,8 +319,7 @@ def get_model_descriptor(config):
     loss_short = loss_map.get(config['loss_type'], config['loss_type'])
     miner_short = miner_map.get(config['miner_type'], 'NoMiner')
 
-    # Create descriptor
-    descriptor = f"{loss_short}_{miner_short}_{config['hidden_dim']}d"
+    descriptor = f"{mode}_{loss_short}_{miner_short}_{config['hidden_dim']}d"
 
     if config['num_hidden_layers'] > 1:
         descriptor += f"x{config['num_hidden_layers']}"
@@ -310,13 +328,12 @@ def get_model_descriptor(config):
 
 
 def get_loss_and_miner(config):
-    """Initialize loss function and miner for training only"""
-
+    """Initialize loss function and miner"""
     distance = distances.CosineSimilarity()
 
     if config['loss_type'] == 'SupConLoss':
         loss_fn = losses.SupConLoss(
-            temperature=0.05,  # Lower temperature often better
+            temperature=0.05,
             distance=distance
         )
     elif config['loss_type'] == 'MultiSimilarityLoss':
@@ -334,265 +351,142 @@ def get_loss_and_miner(config):
     else:
         raise ValueError(f"Unknown loss type: {config['loss_type']}")
 
-    # Miner - CHANGE THIS PART
     if config['miner_type'] == 'MultiSimilarityMiner':
         miner = miners.MultiSimilarityMiner(
             epsilon=config['miner_epsilon'], distance=distance
         )
     elif config['miner_type'] == 'TripletMarginMiner':
         miner = miners.TripletMarginMiner(
-            margin=config.get('miner_margin', 0.5),  # Use config value, default 0.5
+            margin=config.get('miner_margin', 0.5),
             distance=distance,
-            type_of_triplets=config.get('miner_triplet_type', 'hard')  # Use 'hard' instead of 'semihard'
+            type_of_triplets=config.get('miner_triplet_type', 'hard')
         )
     else:
         miner = None
 
     print(f"Loss function: {config['loss_type']}")
-    print(f"Miner: {config['miner_type'] if miner else 'None'}")
-    if config['miner_type'] == 'TripletMarginMiner':
-        print(f"  - Margin: {config.get('miner_margin', 0.5)}")
-        print(f"  - Triplet type: {config.get('miner_triplet_type', 'hard')}")
+    if miner:
+        print(f"Miner: {config['miner_type']}")
+    else:
+        print("No miner")
 
     return loss_fn, miner
 
 
-def validate_retrieval_accuracy_with_faiss(model, train_loader, val_loader, device):
-    """
-    Validation using FAISS indices
-    """
-    import faiss
-
-    model.eval()
-
-    # Collect train embeddings and build FAISS index
-    train_embeddings = []
-    train_labels = []
-
-    with torch.no_grad():
-        for embeddings, labels in tqdm(train_loader, desc="  Collecting train embeddings", leave=False):
-            embeddings = embeddings.to(device)
-            projected = model(embeddings)
-            projected = torch.nn.functional.normalize(projected, p=2, dim=1)
-            train_embeddings.append(projected.cpu().numpy())
-            train_labels.extend(labels.numpy())
-
-    train_embeddings = np.vstack(train_embeddings).astype('float32')
-    train_labels = np.array(train_labels)
-
-    # Build FAISS index (Flat for accuracy)
-    print(f"  Building FAISS index with {len(train_embeddings)} vectors...", end="")
-    d = train_embeddings.shape[1]
-    train_index = faiss.IndexFlatL2(d)
-    train_index.add(train_embeddings)
-    print(" Done")
-
-    # Collect val embeddings
-    val_embeddings = []
-    val_labels = []
-
-    with torch.no_grad():
-        for embeddings, labels in tqdm(val_loader, desc="  Collecting val embeddings", leave=False):
-            embeddings = embeddings.to(device)
-            projected = model(embeddings)
-            projected = torch.nn.functional.normalize(projected, p=2, dim=1)
-            val_embeddings.append(projected.cpu().numpy())
-            val_labels.extend(labels.numpy())
-
-    val_embeddings = np.vstack(val_embeddings).astype('float32')
-    val_labels = np.array(val_labels)
-
-    # Search val queries in train index with k=10 for recall metrics
-    print(f"  Searching {len(val_embeddings)} queries in FAISS index...", end="")
-    k_max = 10  # Get top-10 for recall calculation
-    distances, indices = train_index.search(val_embeddings, k_max)
-    print(" Done")
-
-    # Calculate Recall@K metrics
-    recalls = {}
-    k_values = [1, 5, 10]
-
-    for k in k_values:
-        correct = 0
-        for i in range(len(val_labels)):
-            # Check if true label appears in top-k predictions
-            top_k_labels = train_labels[indices[i, :k]]
-            if val_labels[i] in top_k_labels:
-                correct += 1
-        recalls[k] = correct / len(val_labels)
-
-    # Top-1 accuracy (same as Recall@1)
-    accuracy = recalls[1]
-
-    # Print metrics
-    print(f"    Accuracy (Recall@1): {accuracy:.4f}")
-    print(f"    Recall@5: {recalls[5]:.4f}")
-    print(f"    Recall@10: {recalls[10]:.4f}")
-
-    model.train()
-
-    # Return dict with all metrics
-    return {
-        'accuracy': accuracy,
-        'recall@1': recalls[1],
-        'recall@5': recalls[5],
-        'recall@10': recalls[10]
-    }
-
-
 def validate_retrieval_accuracy(model, val_loader, device, train_loader=None):
-    """
-    FAISS for evaluation
-    Falls back to simple similarity if train_loader not provided
-    """
-    if train_loader is not None:
-        return validate_retrieval_accuracy_with_faiss(model, train_loader, val_loader, device)
-
-    # Fallback to original implementation
+    """Validate using retrieval accuracy, recall, and MRR"""
     model.eval()
 
     all_embeddings = []
     all_labels = []
 
     with torch.no_grad():
-        for embeddings, labels in tqdm(val_loader, desc="Collecting val embeddings", leave=False):
+        for embeddings, labels in val_loader:
             embeddings = embeddings.to(device)
             projected = model(embeddings)
-            projected = torch.nn.functional.normalize(projected, p=2, dim=1)
-            all_embeddings.append(projected)
-            all_labels.append(labels.to(device))
+            all_embeddings.append(projected.cpu())
+            all_labels.append(labels)
 
-    all_embeddings = torch.cat(all_embeddings)
-    all_labels = torch.cat(all_labels)
+    all_embeddings = torch.cat(all_embeddings, dim=0)
+    all_labels = torch.cat(all_labels, dim=0)
 
-    n_samples = len(all_embeddings)
+    # Compute similarities
+    similarities = torch.mm(all_embeddings, all_embeddings.t())
+    similarities.fill_diagonal_(-float('inf'))
 
-    # Simple self-similarity (old method)
-    if n_samples > 10000:
-        correct = 0
-        chunk_size = 1000
+    # Get top-k indices
+    _, top1_indices = similarities.topk(1, dim=1)
+    _, top5_indices = similarities.topk(5, dim=1)
+    _, top10_indices = similarities.topk(10, dim=1)
 
-        for i in tqdm(range(0, n_samples, chunk_size), desc="Computing accuracy", leave=False):
-            end_idx = min(i + chunk_size, n_samples)
-            chunk_embeddings = all_embeddings[i:end_idx]
-            chunk_labels = all_labels[i:end_idx]
+    # Recall@1 (same as accuracy)
+    predictions = all_labels[top1_indices.squeeze()]
+    recall_1 = (predictions == all_labels).float().mean().item()
 
-            distances = torch.cdist(chunk_embeddings, all_embeddings)
+    # Recall@5 and Recall@10
+    recall_5 = 0
+    recall_10 = 0
+    for i in range(len(all_labels)):
+        if all_labels[i] in all_labels[top5_indices[i]]:
+            recall_5 += 1
+        if all_labels[i] in all_labels[top10_indices[i]]:
+            recall_10 += 1
 
-            for j in range(len(chunk_embeddings)):
-                distances[j, i + j] = float('inf')
+    recall_5 /= len(all_labels)
+    recall_10 /= len(all_labels)
 
-            nearest_indices = distances.argmin(dim=1)
-            nearest_labels = all_labels[nearest_indices]
+    # MRR - Mean Reciprocal Rank
+    # For each query, find rank of first correct match
+    _, all_indices = similarities.topk(similarities.size(1), dim=1)
+    reciprocal_ranks = []
+    for i in range(len(all_labels)):
+        query_label = all_labels[i]
+        retrieved_labels = all_labels[all_indices[i]]
+        # Find first position where label matches
+        matches = (retrieved_labels == query_label).nonzero(as_tuple=True)[0]
+        if len(matches) > 0:
+            rank = matches[0].item() + 1  # 1-indexed
+            reciprocal_ranks.append(1.0 / rank)
+        else:
+            reciprocal_ranks.append(0.0)
 
-            correct += (nearest_labels == chunk_labels).sum().item()
-
-        accuracy = correct / n_samples
-    else:
-        distances = torch.cdist(all_embeddings, all_embeddings)
-        distances.fill_diagonal_(float('inf'))
-        nearest_indices = distances.argmin(dim=1)
-        nearest_labels = all_labels[nearest_indices]
-        accuracy = (nearest_labels == all_labels).float().mean().item()
-
-    del all_embeddings
-    del all_labels
-    torch.cuda.empty_cache()
+    mrr = np.mean(reciprocal_ranks)
 
     model.train()
-    return accuracy
 
-
-def load_projection_head(checkpoint_path=None, model_descriptor=None):
-    """Load trained projection head for inference"""
-
-    if checkpoint_path is None:
-        # Try to find the best model based on descriptor
-        if model_descriptor:
-            search_pattern = f"*{model_descriptor}*/best_model.pth"
-            candidates = list(TRAIN_CONFIG['save_dir'].glob(search_pattern))
-            if candidates:
-                checkpoint_path = candidates[-1]  # Use most recent
-            else:
-                raise FileNotFoundError(f"No model found for descriptor: {model_descriptor}")
-        else:
-            # Fallback to most recent best model
-            candidates = list(TRAIN_CONFIG['save_dir'].glob("*/best_model.pth"))
-            if candidates:
-                checkpoint_path = candidates[-1]
-            else:
-                raise FileNotFoundError("No trained models found")
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
-
-    # Initialize model
-    model = ProjectionHead(
-        input_dim=TRAIN_CONFIG['input_dim'],
-        hidden_dim=TRAIN_CONFIG['hidden_dim'],
-        output_dim=TRAIN_CONFIG['output_dim'],
-        num_hidden_layers=TRAIN_CONFIG['num_hidden_layers'],
-        dropout=TRAIN_CONFIG['dropout']
-    )
-
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model.load_state_dict(checkpoint['model_state_dict'])
-
-    print(f"Loaded model from: {checkpoint_path}")
-    if 'model_descriptor' in checkpoint:
-        print(f"Model configuration: {checkpoint['model_descriptor']}")
-    if 'val_accuracy' in checkpoint:
-        print(f"Model validation accuracy: {checkpoint['val_accuracy']:.4f}")
-    if 'dataset_info' in checkpoint:
-        info = checkpoint['dataset_info']
-        print(f"Trained on: {info['num_train']} train, {info['num_val']} val samples")
-        print(f"Number of classes: {info['num_classes']}")
-
-    return model
+    return {
+        'accuracy': recall_1,
+        'recall@1': recall_1,
+        'recall@5': recall_5,
+        'recall@10': recall_10,
+        'mrr': mrr
+    }
 
 
 # ============================================================================
-# MAIN TRAINING FUNCTION
+# TRAINING
 # ============================================================================
 
-def train():
-    """Main training function with improved naming"""
+def train(mode=None):
+    """Main training function"""
+    if mode is None:
+        mode = TRAINING_MODE
 
-    # Get model descriptor for naming
-    model_descriptor = get_model_descriptor(TRAIN_CONFIG)
-
-    print("\n" + "=" * 70)
-    print("FINE-TUNING")
-    print(f"Configuration: {model_descriptor}")
-    print("=" * 70)
+    print(f"\n{'=' * 70}")
+    print(f"VISION EMBEDDING FINE-TUNING")
+    print(f"Mode: {mode.upper()}")
+    print('=' * 70)
 
     device = torch.device(TRAIN_CONFIG['device'])
-    print(f"\nDevice: {device}")
-    if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"Using device: {device}")
 
-    # Create output directory with model descriptor
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = TRAIN_CONFIG['save_dir'] / f"{model_descriptor}_{timestamp}"
+    # Update save directory for this mode
+    save_dir = get_save_dir(mode)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nSave directory: {save_dir}")
+    # Create model descriptor
+    model_descriptor = get_model_descriptor(TRAIN_CONFIG, mode)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    print(f"\nModel configuration: {model_descriptor}")
+    print(f"Saving to: {save_dir}")
 
     # Save configuration
     with open(save_dir / 'config.json', 'w') as f:
         config_to_save = {k: str(v) if isinstance(v, Path) else v
                           for k, v in TRAIN_CONFIG.items()}
+        config_to_save['mode'] = mode
         config_to_save['model_descriptor'] = model_descriptor
         config_to_save['timestamp'] = timestamp
         json.dump(config_to_save, f, indent=2)
 
-    # Load datasets
-    train_dataset = ConfirmedOnlyEmbeddingDataset(split='train')
-    val_dataset = ConfirmedOnlyEmbeddingDataset(split='val')
+    # Load datasets with mode
+    train_dataset = EmbeddingDataset(split='train', mode=mode)
+    val_dataset = EmbeddingDataset(split='val', mode=mode)
 
     print(f"\n{'=' * 60}")
     print(f"Dataset Summary:")
+    print(f"  Mode: {mode}")
     print(f"  Train: {len(train_dataset)} samples")
     print(f"  Val: {len(val_dataset)} samples")
     print(f"  Total classes: {len(train_dataset.class_to_idx)}")
@@ -654,7 +548,8 @@ def train():
         'train_loss': [],
         'val_accuracy': [],
         'learning_rates': [],
-        'config': model_descriptor
+        'config': model_descriptor,
+        'mode': mode
     }
 
     # Training loop
@@ -665,52 +560,39 @@ def train():
         epoch_loss = 0
         num_batches = 0
 
-        # Training
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{TRAIN_CONFIG['num_epochs']}")
-
 
         for batch_idx, (embeddings, labels) in enumerate(pbar):
             embeddings = embeddings.to(device)
             labels = labels.to(device)
 
-            # Forward pass
             optimizer.zero_grad()
             projected = model(embeddings)
 
-            # Mining and loss
             if miner:
                 hard_pairs = miner(projected, labels)
                 loss = loss_fn(projected, labels, hard_pairs)
             else:
                 loss = loss_fn(projected, labels)
 
-            # Skip if loss is invalid
             if not torch.isfinite(loss) or loss.item() < 1e-8:
                 continue
 
-            # Backward pass
             loss.backward()
-
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            # Update
             optimizer.step()
             scheduler.step()
 
-            # Track
             epoch_loss += loss.item()
             num_batches += 1
 
-            # Update progress bar
             current_lr = scheduler.get_last_lr()[0]
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
                 'lr': f"{current_lr:.2e}"
             })
 
-        # Epoch metrics
         avg_train_loss = epoch_loss / max(num_batches, 1)
         history['train_loss'].append(avg_train_loss)
         history['learning_rates'].append(scheduler.get_last_lr()[0])
@@ -721,25 +603,23 @@ def train():
 
         # Validation
         if (epoch + 1) % TRAIN_CONFIG['validate_every_n_epochs'] == 0:
-            # Pass both train and val loaders for proper evaluation
             val_metrics = validate_retrieval_accuracy(model, val_loader, device, train_loader)
-            val_accuracy = val_metrics['accuracy']  # For backward compatibility
+            val_accuracy = val_metrics['accuracy']
             history['val_accuracy'].append(val_accuracy)
-            history['val_recall@5'] = history.get('val_recall@5', [])
-            history['val_recall@10'] = history.get('val_recall@10', [])
-            history['val_recall@5'].append(val_metrics['recall@5'])
-            history['val_recall@10'].append(val_metrics['recall@10'])
+            history.setdefault('val_recall@1', []).append(val_metrics['recall@1'])
+            history.setdefault('val_recall@5', []).append(val_metrics['recall@5'])
+            history.setdefault('val_recall@10', []).append(val_metrics['recall@10'])
+            history.setdefault('val_mrr', []).append(val_metrics['mrr'])
 
-            print(f"  Val Accuracy: {val_accuracy:.4f}")
+            print(f"  Val Recall@1: {val_metrics['recall@1']:.4f}")
             print(f"  Val Recall@5: {val_metrics['recall@5']:.4f}")
             print(f"  Val Recall@10: {val_metrics['recall@10']:.4f}")
+            print(f"  Val MRR: {val_metrics['mrr']:.4f}")
 
-            # Save best model with descriptive name
             if val_accuracy > best_val_accuracy:
                 best_val_accuracy = val_accuracy
                 patience_counter = 0
 
-                # Save with descriptive name including accuracy
                 best_model_name = f'best_{model_descriptor}_acc{val_accuracy:.4f}.pth'
                 checkpoint = {
                     'epoch': epoch + 1,
@@ -754,7 +634,7 @@ def train():
                         'num_train': len(train_dataset),
                         'num_val': len(val_dataset),
                         'num_classes': len(train_dataset.class_to_idx),
-                        'confirmed_only': True
+                        'mode': mode
                     }
                 }
 
@@ -762,19 +642,17 @@ def train():
                 torch.save(checkpoint, save_path)
                 print(f"  [SAVED] New best model: {best_model_name}")
 
-                # Also save as 'best_model.pth' for easy loading
                 torch.save(checkpoint, save_dir / 'vision_model.pth')
             else:
                 patience_counter += 1
                 print(f"  Patience: {patience_counter}/{TRAIN_CONFIG['patience']}")
 
-        # Early stopping
         if patience_counter >= TRAIN_CONFIG['patience']:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
             print(f"Best validation accuracy: {best_val_accuracy:.4f}")
             break
 
-    # Save final model with descriptive name
+    # Save final model
     final_model_name = f'final_{model_descriptor}_epochs{epoch + 1}_acc{best_val_accuracy:.4f}.pth'
     final_checkpoint = {
         'model_state_dict': model.state_dict(),
@@ -782,19 +660,20 @@ def train():
         'config': TRAIN_CONFIG,
         'model_descriptor': model_descriptor,
         'final_epoch': epoch + 1,
-        'best_val_accuracy': best_val_accuracy
+        'best_val_accuracy': best_val_accuracy,
+        'mode': mode
     }
 
     torch.save(final_checkpoint, save_dir / final_model_name)
 
-    # Save training history with descriptive name
+    # Save training history
     history_name = f'history_{model_descriptor}.json'
     with open(save_dir / history_name, 'w') as f:
         json.dump(history, f, indent=2)
 
     # Print final summary
     print("\n" + "=" * 70)
-    print("=" * 70)
+    print(f"Mode: {mode.upper()}")
     print(f"Configuration: {model_descriptor}")
     print(f"Total epochs: {epoch + 1}")
     print(f"Best validation accuracy: {best_val_accuracy:.4f}")
@@ -802,7 +681,6 @@ def train():
     print(f"Models saved to: {save_dir}")
     print(f"  Best model: best_{model_descriptor}_acc{best_val_accuracy:.4f}.pth")
     print(f"  Final model: {final_model_name}")
-    print(f"  Update models.py with new configuration")
     print("=" * 70)
 
     return model, history
@@ -810,7 +688,7 @@ def train():
 
 def main():
     """Entry point"""
-    return train()
+    return train(mode=TRAINING_MODE)
 
 
 if __name__ == "__main__":
