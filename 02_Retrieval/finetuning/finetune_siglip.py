@@ -38,7 +38,8 @@ INDEX_DIR = RETRIEVAL_CONFIG.INDEX_DIR
 # TRAINING MODE - SET THIS BEFORE RUNNING
 # ============================================================================
 # Options: 'confirmed', 'unconfirmed', 'combined'
-TRAINING_MODE = 'combined'
+TRAINING_MODE = 'unconfirmed'
+SKIP_VALIDATION = True
 # ============================================================================
 
 # ============================================================================
@@ -261,7 +262,7 @@ class EmbeddingDataset(Dataset):
 
 
 # ============================================================================
-# MODEL
+# MODEL - ORIGINAL DEFINITION (DO NOT MODIFY)
 # ============================================================================
 
 class ProjectionHead(nn.Module):
@@ -271,20 +272,24 @@ class ProjectionHead(nn.Module):
         super().__init__()
 
         self.layers = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            # First expansion
+            nn.Linear(input_dim, hidden_dim),  # 768 -> 3072
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
 
-            nn.Linear(hidden_dim, hidden_dim),
+            # Middle layer (stays wide)
+            nn.Linear(hidden_dim, hidden_dim),  # 3072 -> 3072
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
 
-            nn.Linear(hidden_dim, output_dim),
+            # Final projection
+            nn.Linear(hidden_dim, output_dim),  # 3072 -> 768
             nn.BatchNorm1d(output_dim)
         )
 
+        # Very small or no residual
         self.alpha = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x):
@@ -416,16 +421,14 @@ def validate_retrieval_accuracy(model, val_loader, device, train_loader=None):
     recall_10 /= len(all_labels)
 
     # MRR - Mean Reciprocal Rank
-    # For each query, find rank of first correct match
     _, all_indices = similarities.topk(similarities.size(1), dim=1)
     reciprocal_ranks = []
     for i in range(len(all_labels)):
         query_label = all_labels[i]
         retrieved_labels = all_labels[all_indices[i]]
-        # Find first position where label matches
         matches = (retrieved_labels == query_label).nonzero(as_tuple=True)[0]
         if len(matches) > 0:
-            rank = matches[0].item() + 1  # 1-indexed
+            rank = matches[0].item() + 1
             reciprocal_ranks.append(1.0 / rank)
         else:
             reciprocal_ranks.append(0.0)
@@ -455,6 +458,7 @@ def train(mode=None):
     print(f"\n{'=' * 70}")
     print(f"VISION EMBEDDING FINE-TUNING")
     print(f"Mode: {mode.upper()}")
+    print(f"Skip Validation: {SKIP_VALIDATION}")
     print('=' * 70)
 
     device = torch.device(TRAIN_CONFIG['device'])
@@ -602,7 +606,7 @@ def train(mode=None):
         print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.2e}")
 
         # Validation
-        if (epoch + 1) % TRAIN_CONFIG['validate_every_n_epochs'] == 0:
+        if not SKIP_VALIDATION and (epoch + 1) % TRAIN_CONFIG['validate_every_n_epochs'] == 0:
             val_metrics = validate_retrieval_accuracy(model, val_loader, device, train_loader)
             val_accuracy = val_metrics['accuracy']
             history['val_accuracy'].append(val_accuracy)
@@ -633,7 +637,7 @@ def train(mode=None):
                 checkpoint = {
                     'epoch': epoch + 1,
                     'model_state_dict': model.state_dict(),
-                    'model_config': model_config,  # Explicit architecture params
+                    'model_config': model_config,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'val_accuracy': val_accuracy,
@@ -658,7 +662,7 @@ def train(mode=None):
                 patience_counter += 1
                 print(f"  Patience: {patience_counter}/{TRAIN_CONFIG['patience']}")
 
-        if patience_counter >= TRAIN_CONFIG['patience']:
+        if not SKIP_VALIDATION and patience_counter >= TRAIN_CONFIG['patience']:
             print(f"\nEarly stopping triggered after {epoch + 1} epochs")
             print(f"Best validation accuracy: {best_val_accuracy:.4f}")
             break
@@ -672,7 +676,7 @@ def train(mode=None):
         'dropout': TRAIN_CONFIG['dropout'],
     }
 
-    final_model_name = f'final_{model_descriptor}_epochs{epoch + 1}_acc{best_val_accuracy:.4f}.pth'
+    final_model_name = f'final_{model_descriptor}_epochs{epoch + 1}.pth'
     final_checkpoint = {
         'model_state_dict': model.state_dict(),
         'model_config': model_config,
@@ -686,6 +690,8 @@ def train(mode=None):
     }
 
     torch.save(final_checkpoint, save_dir / final_model_name)
+    # Also save as vision_model.pth for easy loading
+    torch.save(final_checkpoint, save_dir / 'vision_model.pth')
 
     # Save training history
     history_name = f'history_{model_descriptor}.json'
@@ -700,7 +706,6 @@ def train(mode=None):
     print(f"Best validation accuracy: {best_val_accuracy:.4f}")
     print(f"Final train loss: {history['train_loss'][-1]:.4f}")
     print(f"Models saved to: {save_dir}")
-    print(f"  Best model: best_{model_descriptor}_acc{best_val_accuracy:.4f}.pth")
     print(f"  Final model: {final_model_name}")
     print("=" * 70)
 
