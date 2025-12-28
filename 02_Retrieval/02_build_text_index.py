@@ -101,9 +101,9 @@ class TextFAISSIndexBuilder:
         # Initialize model with same config as training
         self.projection_model = TextProjectionHead(
             input_dim=768,
-            hidden_dim=checkpoint['config'].get('hidden_dim', 3072),  # Match your training config
+            hidden_dim=checkpoint['config'].get('hidden_dim', 3072),
             output_dim=checkpoint['config'].get('output_dim', 768),
-            num_hidden_layers=2, #HARDCODED TEMPORARY OVERRIDE
+            num_hidden_layers=checkpoint['config'].get('num_hidden_layers', 2),
             dropout=0.0  # No dropout for inference
         )
 
