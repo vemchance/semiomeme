@@ -90,9 +90,9 @@ class FAISSIndexBuilder:
         # Initialize model with same config as training
         self.projection_model = ProjectionHead(
             input_dim=768,
-            hidden_dim=checkpoint['config'].get('hidden_dim', 3072),  # Match your training config
+            hidden_dim=checkpoint['config'].get('hidden_dim', 3072),  
             output_dim=checkpoint['config'].get('output_dim', 768),
-            num_hidden_layers=checkpoint['config'].get('num_hidden_layers', 3),  # Match your training config
+            num_hidden_layers=checkpoint['config'].get('num_hidden_layers', 3),  
             dropout=0.0  # No dropout for inference
         )
 
@@ -153,16 +153,9 @@ class FAISSIndexBuilder:
                 chunk_metadata = json.load(f)
 
             # Process each embedding based on its type
-            processed_embeddings = []
             for i, img_meta in enumerate(chunk_metadata['valid_images']):
-                path = img_meta['path']
-                embedding = chunk_embeddings[i:i + 1]  # Keep as 2D array
-
-                # Check if this is a confirmed meme
-                is_confirmed = (
-                        'Confirmed Images' in path and
-                        'Unconfirmed' not in path
-                )
+                embedding = chunk_embeddings[i:i + 1]
+                is_confirmed = img_meta['dataset_type'] == 'confirmed'
 
                 # Apply projection ONLY to confirmed memes
                 if self.use_projection and is_confirmed:
@@ -189,24 +182,13 @@ class FAISSIndexBuilder:
             # Build mappings
             for i, img_meta in enumerate(chunk_metadata['valid_images']):
                 idx = current_idx + i
-                path = img_meta['path']
-
-                self.idx_to_image[idx] = path
+            
+                self.idx_to_image[idx] = img_meta['filename']  # Use filename instead of full path
                 self.idx_to_class[idx] = img_meta['class_id']
                 self.idx_to_popularity[idx] = img_meta['popularity']
                 self.idx_to_filename[idx] = img_meta['filename']
-
-                # Determine dataset type
-                path_lower = path.lower()
-                if 'confirmed' in path_lower and 'unconfirmed' not in path_lower:
-                    self.idx_to_dataset_type[idx] = 'confirmed'
-                    self.idx_to_split[idx] = None  # Will be assigned later
-                elif 'unconfirmed' in path_lower:
-                    self.idx_to_dataset_type[idx] = 'unconfirmed'
-                    self.idx_to_split[idx] = None  # Will be assigned later
-                else:
-                    self.idx_to_dataset_type[idx] = 'unknown'
-                    self.idx_to_split[idx] = 'train'  # Default
+                self.idx_to_dataset_type[idx] = img_meta['dataset_type']
+                self.idx_to_split[idx] = None
 
             current_idx += len(chunk_embeddings_processed)
 
