@@ -2,6 +2,8 @@
 
 A three-layer knowledge graph system for internet meme analysis, combining symbolic RDF representations with neural embeddings.
 
+Accompanying repo: https://github.com/vemchance/kym_scraper (KYM WebScraper)
+
 ## Overview
 
 SemioMeme integrates:
