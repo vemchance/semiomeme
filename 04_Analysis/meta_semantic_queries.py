@@ -111,7 +111,7 @@ def get_color_for_type(entity_type):
     return color_map.get(entity_type, color_map['default'])
 
 # ============================================================================
-# 1. QUERY AND PROCESS DATA (WITH CASE-INSENSITIVE MERGING)
+# QUERY AND PROCESS DATA
 # ============================================================================
 print("\n" + "=" * 80)
 print(f"ANALYZING: {entity_label.upper()}")
@@ -195,7 +195,7 @@ for row in meme_results:
         temporal_data[year][connection_type] += 1
 
 # ============================================================================
-# 2. BUILD SECONDARY CONNECTIONS WITH CASE-INSENSITIVE MERGING
+# BUILD SECONDARY CONNECTIONS WITH CASE-INSENSITIVE MERGING
 # ============================================================================
 print("\nProcessing secondary connections with case-insensitive merging...")
 
@@ -271,7 +271,7 @@ top_secondary = sorted(entity_connections.items(),
                       reverse=True)[:20]
 
 # ============================================================================
-# 3. QUERY ENTITY DETAILS FOR PANEL
+#  QUERY ENTITY DETAILS FOR PANEL
 # ============================================================================
 print("\nQuerying entity RDF details...")
 
@@ -327,7 +327,7 @@ tags_count = int(stats_results[0][1]) if stats_results[0][1] else 0
 series_count = int(stats_results[0][2]) if stats_results[0][2] else 0
 
 # ============================================================================
-# 4. STANDALONE ENTITY ENTRY DETAILS (PAPER-READY)
+#  STANDALONE ENTITY ENTRY DETAILS (PAPER-READY)
 # ============================================================================
 print("\nCreating standalone entity entry details for paper...")
 
@@ -550,7 +550,7 @@ print(f"Saved: {OUTPUT_FOLDER}{TARGET_ENTITY}_entity_entry_details.png")
 plt.close()
 
 # ============================================================================
-# 5. STANDALONE NETWORK VISUALIZATION
+#  STANDALONE NETWORK VISUALIZATION
 # ============================================================================
 print("\nCreating standalone network visualization...")
 
@@ -724,7 +724,7 @@ plt.savefig(OUTPUT_FOLDER + f"{TARGET_ENTITY}_network_graph.png",
 print(f"Saved: {OUTPUT_FOLDER}{TARGET_ENTITY}_network_graph.png")
 plt.close()
 # ============================================================================
-# 6. TEMPORAL EVOLUTION (SEPARATE)
+#  TEMPORAL EVOLUTION 
 # ============================================================================
 print("\nCreating temporal evolution chart...")
 
@@ -775,7 +775,7 @@ if temporal_data:
         plt.close()
 
 # ============================================================================
-# 7. CONNECTION TYPE ANALYSIS (SEPARATE)
+#  CONNECTION TYPE ANALYSIS 
 # ============================================================================
 print("\nCreating connection type analysis...")
 
@@ -825,7 +825,7 @@ print(f"Saved: {OUTPUT_FOLDER}{TARGET_ENTITY}_connection_type_analysis.png")
 plt.close()
 
 # ============================================================================
-# 8. CO-OCCURRENCE HEATMAP (SEPARATE)
+#  CO-OCCURRENCE HEATMAP (SEPARATE)
 # ============================================================================
 print("\nGenerating co-occurrence heatmap...")
 
@@ -872,7 +872,7 @@ print(f"Saved: {OUTPUT_FOLDER}{TARGET_ENTITY}_cooccurrence_heatmap.png")
 plt.close()
 
 # ============================================================================
-# 9. PATHWAY ANALYSIS (SEPARATE)
+#  PATHWAY ANALYSIS
 # ============================================================================
 print("\nAnalyzing connection pathways...")
 
@@ -916,7 +916,7 @@ print(f"Saved: {OUTPUT_FOLDER}{TARGET_ENTITY}_pathway_analysis.png")
 plt.close()
 
 # ============================================================================
-# 10. GENERATE SUMMARY STATISTICS
+#  GENERATE SUMMARY STATISTICS
 # ============================================================================
 print("\nGenerating summary statistics...")
 
