@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Detailed Graph Statistics for Academic Paper Table
+Detailed Graph Statistics
 Focuses on entity/edge counts and extraction sources with proper REBEL categorization
 """
 
