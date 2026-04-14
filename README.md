@@ -112,8 +112,7 @@ python full_graph_statistics.py           # Generate statistics
 
 ## Data
 
-Data files are available separately via Zenodo: [DOI placeholder]
-
+Data files are available separately via Zenodo: https://zenodo.org/records/17826799
 Required data structure:
 ```
 data/
@@ -131,7 +130,7 @@ data/
 
 ## Citation
 
-[Citation placeholder]
+Paper: [pending - accepted at ICWSM 2026] Full citation to follow upon publication
 
 ## License
 
