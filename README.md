@@ -4,6 +4,29 @@ A three-layer knowledge graph system for internet meme analysis, combining symbo
 
 Accompanying repo: https://github.com/vemchance/kym_scraper (KYM WebScraper)
 
+## Citation
+
+If you use SemioMeme in your work, please cite the ICWSM proceedings paper:
+
+> Sherratt, V., Elayan, S., & Dethlefs, N. (2026). SemioMeme: A Symbolic–Subsymbolic Knowledge Graph Dataset for Multimodal Meme Analysis. *Proceedings of the International AAAI Conference on Web and Social Media*, 20(1), 2921–2935. https://doi.org/10.1609/icwsm.v20i1.42792
+
+### BibTeX
+
+```bibtex
+@article{Sherratt_Elayan_Dethlefs_2026,
+  title     = {SemioMeme: A Symbolic--Subsymbolic Knowledge Graph Dataset for Multimodal Meme Analysis},
+  author    = {Sherratt, Victoria and Elayan, Suzanne and Dethlefs, Nina},
+  journal   = {Proceedings of the International AAAI Conference on Web and Social Media},
+  volume    = {20},
+  number    = {1},
+  pages     = {2921--2935},
+  year      = {2026},
+  month     = may,
+  doi       = {10.1609/icwsm.v20i1.42792},
+  url       = {https://ojs.aaai.org/index.php/ICWSM/article/view/42792}
+}
+```
+
 ## Overview
 
 SemioMeme integrates:
@@ -127,10 +150,6 @@ data/
     ├── ocr/                    # OCR CSV files
     └── faiss_indexes/          # Deployed indices
 ```
-
-## Citation
-
-Paper: [pending - accepted at ICWSM 2026] Full citation to follow upon publication
 
 ## License
 
